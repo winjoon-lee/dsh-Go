@@ -1,0 +1,50 @@
+# Fork-only helper workflow: publishes an already-built libnode.so artifact
+# as a public release asset, without rebuilding anything.
+# Use case: run #2 of "OHOS libnode" built libnode.so fine and uploaded the
+# artifact, but its final publish step failed because `gh release` was run
+# outside the git checkout ("fatal: not a git repository"). This workflow
+# downloads that artifact and publishes it.
+# Trigger manually: Actions -> Publish libnode release -> Run workflow,
+# with run_id = the OHOS libnode run that produced the artifact.
+
+name: Publish libnode release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run id of the OHOS libnode run whose artifact to publish'
+        required: true
+        default: '45392568749'
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ohos-libnode-24.22.1
+          run-id: ${{ inputs.run_id }}
+          path: libnode-artifacts
+          github-token: ${{ github.token }}
+
+      - name: Publish libnode.so as a public release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd libnode-artifacts
+          ls -lh
+          file libnode.so
+          if gh release view libnode-24.22.1 --repo winjoon-lee/dsh-Go >/dev/null 2>&1; then
+            gh release upload libnode-24.22.1 libnode.so build.json --clobber --repo winjoon-lee/dsh-Go
+          else
+            gh release create libnode-24.22.1 libnode.so build.json \
+              --repo winjoon-lee/dsh-Go \
+              --title "libnode 24.22.1 (HarmonyOS arm64)" \
+              --notes "Cross-compiled libnode.so for aarch64-linux-ohos, Node 24.22.1, built by the OHOS libnode workflow."
+          fi
