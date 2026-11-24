@@ -1,0 +1,197 @@
+# Fork-only workflow: builds the HAP's remaining native libs beside the
+# already-built libnode.so (libdsh_flock.so, libdsh_require_builtin.so,
+# libdsh_host.so) via runtime/ohos/native/build-hap-libs.py.
+# Never offered upstream (dsh-Go takes no external PRs).
+# Pushing this file starts a run; it publishes the libs as a public
+# release asset (hap-libs-24.22.1) and uploads them as an artifact (14 days).
+#
+# Inputs (all fetched, none committed):
+# - libnode.so + build.json: downloaded from the fork's public release
+#   libnode-24.22.1 (built by the OHOS libnode workflow, run #2).
+# - OpenHarmony SDK 7.0 API 26 from Huawei's public mirror (SHA256-verified).
+# - clang 23.1.1 exact (official binary tarball) + LLVM 23.1.1 source for
+#   the C++ runtimes (build-runtimes.py, same as the libnode workflow).
+# - Node 24.22.1 source (headers + SHA256 pin) + host Node for npm.
+# - @deepseek-ai/node-addon-system 0.1.2 and node-addon-api 8.9.2 from npm.
+# - Loader source: deepseek-ai/dsh-node-addon-require-builtin 0.1.9,
+#   commit a58d3599, SHA256-verified (loader/source-pins.json).
+#
+# Known: the LLVM C++ runtimes are rebuilt here (they were not preserved
+# as an artifact by the libnode run); build-runtimes.py is fast (~30 s
+# on 16 cores, a few minutes on 4 vCPU).
+
+name: OHOS hap libs
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/ohos-hap-libs.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  hap-libs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      NODE_VERSION: 24.22.1
+      LLVM_VERSION: 23.1.1
+      NODE_SRC_SHA256: 4f5379796280cdaeb0c2f358fd04b6a16cc4fb7dfa83b5a8c91a9d963b435231
+      LLVM_SRC_SHA256: ebe9be46fe8756d58c5b198ffad0fa2a766257add81a4dc52179bfacc7888ee6
+      NODE_HOST_SHA256: 6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
+      LOADER_SHA256: 286616f15e4f12013988e45ad27a69b4968a9f059c8bd351e412505230577948
+      LOADER_COMMIT: a58d3599a2e551d7d706d1ff796c9fd4bbaff63c
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Free disk
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+          df -h
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3.12 cmake ninja-build make patch xz-utils curl jq
+          python3 --version
+          cmake --version | head -1
+
+      - name: Fetch the OpenHarmony SDK from the public Huawei mirror
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}"
+          curl -fsSL -o ohos-sdk.tar.gz \
+            "https://mirrors.huaweicloud.com/openharmony/os/7.0-Release/ohos-sdk-windows_linux-public.tar.gz"
+          echo "130a438cbcddd46a2a5b09ee9925339cddf4cca99223329b860f96a5c72f338f  ohos-sdk.tar.gz" | sha256sum -c -
+          tar -xf ohos-sdk.tar.gz ohos-sdk/linux/native-linux-x64-26.0.0.38-Beta.zip
+          rm ohos-sdk.tar.gz
+          mkdir -p ohos-sdk
+          unzip -q ohos-sdk/linux/native-linux-x64-26.0.0.38-Beta.zip -d ohos-sdk
+          rm -rf ohos-sdk/linux
+          ls ohos-sdk/native/oh-uni-package.json
+          python3 -c "import json; d=json.load(open('ohos-sdk/native/oh-uni-package.json')); assert str(d['apiVersion'])=='26' and d['version']=='26.0.0.38', d"
+
+      - name: Fetch pinned Node and LLVM sources + host Node
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}"
+          curl -fsSL -o node-v24.22.1.tar.xz \
+            "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz"
+          echo "${NODE_SRC_SHA256}  node-v24.22.1.tar.xz" | sha256sum -c -
+          curl -fsSL -o llvm-project-23.1.1.src.tar.xz \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/llvm-project-23.1.1.src.tar.xz"
+          echo "${LLVM_SRC_SHA256}  llvm-project-23.1.1.src.tar.xz" | sha256sum -c -
+          curl -fsSL -o node-v24.22.1-linux-x64.tar.xz \
+            "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+          echo "${NODE_HOST_SHA256}  node-v24.22.1-linux-x64.tar.xz" | sha256sum -c -
+          tar -xf node-v24.22.1-linux-x64.tar.xz
+          rm node-v24.22.1-linux-x64.tar.xz
+          tar -xf node-v${NODE_VERSION}.tar.xz
+          rm node-v24.22.1.tar.xz
+          "${{ runner.temp }}/node-v24.22.1-linux-x64/bin/node" --version
+
+      - name: Fetch clang 23.1.1 (exact version required, apt is too new)
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}"
+          curl -fsSL -o llvm-23.1.1.tar.xz \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/LLVM-23.1.1-Linux-X64.tar.xz"
+          mkdir llvm-23.1.1
+          tar -xf llvm-23.1.1.tar.xz -C llvm-23.1.1 --strip-components=1
+          rm llvm-23.1.1.tar.xz
+          ./llvm-23.1.1/bin/clang -dumpversion
+          test "$(./llvm-23.1.1/bin/clang -dumpversion)" = '23.1.1'
+
+      - name: Download libnode.so + build.json from the public release
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/libnode-output"
+          cd "${{ runner.temp }}/libnode-output"
+          curl -fsSL -o libnode.so \
+            "https://github.com/winjoon-lee/dsh-Go/releases/download/libnode-24.22.1/libnode.so"
+          curl -fsSL -o build.json \
+            "https://github.com/winjoon-lee/dsh-Go/releases/download/libnode-24.22.1/build.json"
+          echo "de550601ee4d25236b6a2fe4c2570465c59f259e961933a5ec40ebaa5133bb8c  libnode.so" | sha256sum -c -
+          echo "ff62bc139d8cbf79a1a07fe724d6a785d69bbc3fbdb6decac69743128828b737  build.json" | sha256sum -c -
+          file libnode.so
+
+      - name: Fetch the third-party inputs (npm packages + loader source)
+        run: |
+          set -euo pipefail
+          export PATH="${{ runner.temp }}/node-v24.22.1-linux-x64/bin:$PATH"
+          node --version
+          npm --version
+          cd "${{ runner.temp }}"
+          mkdir -p third-party && cd third-party
+          npm pack @deepseek-ai/node-addon-system@0.1.2
+          mkdir -p flock-package && tar -xzf deepseek-ai-node-addon-system-0.1.2.tgz -C flock-package --strip-components=1
+          test -f flock-package/src/flock.c
+          npm pack node-addon-api@8.9.2
+          mkdir -p node-addon-api && tar -xzf node-addon-api-8.9.2.tgz -C node-addon-api --strip-components=1
+          test -f node-addon-api/napi.h
+          curl -fsSL -o loader.tar.gz \
+            "https://codeload.github.com/deepseek-ai/dsh-node-addon-require-builtin/tar.gz/${LOADER_COMMIT}"
+          echo "${LOADER_SHA256}  loader.tar.gz" | sha256sum -c -
+          mkdir -p loader-source && tar -xzf loader.tar.gz -C loader-source --strip-components=1
+          rm loader.tar.gz
+          test -f loader-source/packages/native/src/node_api_addon.cc
+
+      - name: Build the LLVM C++ runtimes (libc++/libc++abi/libunwind)
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 runtime/ohos/node/build-runtimes.py \
+            --sdk-native "${{ runner.temp }}/ohos-sdk/native" \
+            --clang "${{ runner.temp }}/llvm-23.1.1/bin/clang" \
+            --source-archive "${{ runner.temp }}/llvm-project-23.1.1.src.tar.xz" \
+            --work "${{ runner.temp }}/runtimes-build" \
+            --output "${{ runner.temp }}/ohos-llvm-runtimes" \
+            --jobs 4
+          rm -f "${{ runner.temp }}/llvm-project-23.1.1.src.tar.xz"
+
+      - name: Build the HAP native libs (flock, loader, host) + audit
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 runtime/ohos/native/build-hap-libs.py \
+            --sdk-native "${{ runner.temp }}/ohos-sdk/native" \
+            --clang "${{ runner.temp }}/llvm-23.1.1/bin/clang" \
+            --cxx-runtime "${{ runner.temp }}/ohos-llvm-runtimes" \
+            --libnode-output "${{ runner.temp }}/libnode-output" \
+            --node-source "${{ runner.temp }}/node-v24.22.1" \
+            --flock-package "${{ runner.temp }}/third-party/flock-package" \
+            --loader-source "${{ runner.temp }}/third-party/loader-source" \
+            --node-addon-api "${{ runner.temp }}/third-party/node-addon-api" \
+            --work "${{ runner.temp }}/hap-libs-work" \
+            --output "${{ runner.temp }}/hap-libs/arm64-v8a"
+          ls -lh "${{ runner.temp }}/hap-libs/arm64-v8a"
+          cat "${{ runner.temp }}/hap-libs/audit.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ohos-hap-libs-24.22.1
+          path: |
+            ${{ runner.temp }}/hap-libs/arm64-v8a/*.so
+            ${{ runner.temp }}/hap-libs/audit.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish the HAP native libs as a public release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/hap-libs"
+          if gh release view hap-libs-24.22.1 --repo ${{ github.repository }} >/dev/null 2>&1; then
+            gh release upload hap-libs-24.22.1 arm64-v8a/*.so audit.json --clobber --repo ${{ github.repository }}
+          else
+            gh release create hap-libs-24.22.1 arm64-v8a/*.so audit.json \
+              --repo ${{ github.repository }} \
+              --title "HAP native libs 24.22.1 (HarmonyOS arm64)" \
+              --notes "libdsh_flock.so, libdsh_require_builtin.so and libdsh_host.so for aarch64-linux-ohos, built beside libnode 24.22.1 by the OHOS hap libs workflow."
+          fi
