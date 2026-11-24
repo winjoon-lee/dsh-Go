@@ -185,10 +185,11 @@ jobs:
         run: |
           set -euo pipefail
           cd "${{ runner.temp }}/node-ohos-artifacts"
-          if gh release view libnode-24.22.1 >/dev/null 2>&1; then
-            gh release upload libnode-24.22.1 libnode.so build.json --clobber
+          if gh release view libnode-24.22.1 --repo ${{ github.repository }} >/dev/null 2>&1; then
+            gh release upload libnode-24.22.1 libnode.so build.json --clobber --repo ${{ github.repository }}
           else
             gh release create libnode-24.22.1 libnode.so build.json \
+              --repo ${{ github.repository }} \
               --title "libnode 24.22.1 (HarmonyOS arm64)" \
               --notes "Cross-compiled libnode.so for aarch64-linux-ohos, Node 24.22.1, built by the OHOS libnode workflow."
           fi
