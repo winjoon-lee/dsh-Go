@@ -1,0 +1,199 @@
+# Fork-only workflow: builds the HarmonyOS libnode.so (Node 24.22.1
+# cross-compiled for aarch64-linux-ohos) on a GitHub-hosted Ubuntu runner.
+# Never offered upstream (dsh-Go takes no external PRs).
+# Pushing this file starts a run; it also publishes libnode.so as a
+# public release asset (libnode-24.22.1) so it can be downloaded
+# without a token, and uploads it as an artifact (14 days).
+#
+# What it produces: libnode.so (~82 MB stripped) + build.json, as the
+# artifact `ohos-libnode-24.22.1`, retention 14 days (same as ohos-aot).
+# It does NOT build the other HAP native libs (libdsh_flock.so,
+# libdsh_require_builtin.so) — those need build-hap-libs.py plus three more
+# third-party inputs (flock npm package, loader archive, node-addon-api);
+# that is a follow-up step once libnode works.
+#
+# Verified against the repo (2026-11-24, local checkout of dsh-Go main):
+# - runtime/ohos/node/BUILD.md: exact commands, pins and timings.
+#   Node 24.22.1 source SHA256 4f5379796280cdaeb0c2f358fd04b6a16cc4fb7dfa83b5a8c91a9d963b435231
+#   LLVM 23.1.1 source SHA256 ebe9be46fe8756d58c5b198ffad0fa2a766257add81a4dc52179bfacc7888ee6
+#   Measured on 16-core/14 GB: runtimes 30 s, Node 4147 s at -j4 with a 6 GB
+#   memory cap; Node work dir 1.7 GB. On a 4-vCPU runner expect ~1.5-2.5 h.
+# - runtime/ohos/node/build-runtimes.py --help / build-node.py --help:
+#   exact CLI flags used below. build-runtimes.py REFUSES any clang whose
+#   `-dumpversion` is not exactly 23.1.1, so apt's clang-23 (now 23.1.x
+#   newer patch) can NOT be used — the official 23.1.1 binary tarball is
+#   used instead (LLVM-23.1.1-Linux-X64.tar.xz, see the release-assets
+#   pattern in llvm/llvm-project PR #147021).
+# - runtime/build-runtime.sh pins node-v24.22.1-linux-x64.tar.xz SHA256
+#   6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6.
+# - build-node.py checks the host node is exactly v24.22.1.
+#
+# TWO THINGS THE USER MUST SUPPLY BEFORE THE FIRST RUN:
+# 1. Fork visibility: a PUBLIC fork gets the free 4-vCPU/16 GB standard
+#    runner; a PRIVATE fork gets only 2 vCPU/8 GB (paid minutes) and the
+#    build will be much slower. The workflow assumes the public shape.
+# 2. The OpenHarmony SDK (API 26, 26.0.0.38): it is behind a Huawei login
+#    and there is no public download URL in the repo, so the workflow
+#    restores it from the Actions cache (key ohos-sdk-26.0.0.38) and FAILS
+#    with instructions if the cache is empty. Seed the cache once from a
+#    machine that already has the SDK (this machine has it at
+#    ~/workspace/harmony/sdk/linux, 3.9 GB extracted) — e.g. upload the
+#    3.2 GB tarball as a release asset in the fork and have a first manual
+#    run download + cache it. Do NOT commit the SDK to the repo.
+#
+# KNOWN RISKS (not yet proven on a runner):
+# - Disk: standard runners have only 14 GB SSD (docs.github.com,
+#   GitHub-hosted runners reference). Budget: SDK 3.9 GB + Node source
+#   0.65 GB + Node work 1.7 GB + LLVM binary ~1 GB + LLVM source 0.18 GB
+#   + checkout ~0.1-0.4 GB. The workflow deletes every tarball right after
+#   extraction and frees the usual preinstalled bulk first; if it still
+#   runs out of disk, the fallback is a larger runner (paid, 150 GB+) or
+#   a self-hosted runner — the same model upstream uses for HAP packaging.
+# - Host GCC on ubuntu-24.04 is GCC 13; BUILD.md used GCC 16.2.1, but
+#   Node's BUILDING.md only requires GCC >= 12.2 for the host compiler.
+# - The LLVM binary URL below follows LLVM's published release-asset
+#   pattern; the workflow verifies it by the script's own 23.1.1 check,
+#   so a wrong asset fails fast with a clear error instead of silently
+#   building with the wrong compiler.
+# - BUILD.md also lists a pre-check `runtime/tests/ohos/node-build.py`;
+#   that file is NOT in this checkout, so the step is omitted here.
+
+name: OHOS libnode
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/ohos-libnode.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  libnode:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      NODE_VERSION: 24.22.1
+      LLVM_VERSION: 23.1.1
+      NODE_SRC_SHA256: 4f5379796280cdaeb0c2f358fd04b6a16cc4fb7dfa83b5a8c91a9d963b435231
+      LLVM_SRC_SHA256: ebe9be46fe8756d58c5b198ffad0fa2a766257add81a4dc52179bfacc7888ee6
+      NODE_HOST_SHA256: 6c172a9ab6718f7b801fb5a7bd486af2ee5e32758086a04b84fcce2aa77095e6
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Free disk (standard runners have only 14 GB SSD)
+        run: |
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc 2>/dev/null || true
+          df -h
+
+      - name: Install host tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            python3.12 cmake ninja-build make patch xz-utils curl jq
+          python3 --version
+          cmake --version | head -1
+
+      - name: Fetch the OpenHarmony SDK from the public Huawei mirror
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}"
+          curl -fsSL -o ohos-sdk.tar.gz \
+            "https://mirrors.huaweicloud.com/openharmony/os/7.0-Release/ohos-sdk-windows_linux-public.tar.gz"
+          echo "130a438cbcddd46a2a5b09ee9925339cddf4cca99223329b860f96a5c72f338f  ohos-sdk.tar.gz" | sha256sum -c -
+          tar -xf ohos-sdk.tar.gz ohos-sdk/linux/native-linux-x64-26.0.0.38-Beta.zip
+          rm ohos-sdk.tar.gz
+          mkdir -p ohos-sdk
+          unzip -q ohos-sdk/linux/native-linux-x64-26.0.0.38-Beta.zip -d ohos-sdk
+          rm -rf ohos-sdk/linux
+          ls ohos-sdk/native/oh-uni-package.json
+          python3 -c "import json; d=json.load(open('ohos-sdk/native/oh-uni-package.json')); assert d['apiVersion']==26 and d['version']=='26.0.0.38', d"
+
+      - name: Fetch pinned Node and LLVM sources + host Node
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}"
+          curl -fsSL -o node-v24.22.1.tar.xz \
+            "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}.tar.xz"
+          echo "${NODE_SRC_SHA256}  node-v24.22.1.tar.xz" | sha256sum -c -
+          curl -fsSL -o llvm-project-23.1.1.src.tar.xz \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/llvm-project-23.1.1.src.tar.xz"
+          echo "${LLVM_SRC_SHA256}  llvm-project-23.1.1.src.tar.xz" | sha256sum -c -
+          curl -fsSL -o node-v24.22.1-linux-x64.tar.xz \
+            "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
+          echo "${NODE_HOST_SHA256}  node-v24.22.1-linux-x64.tar.xz" | sha256sum -c -
+          tar -xf node-v24.22.1-linux-x64.tar.xz
+          rm node-v24.22.1-linux-x64.tar.xz
+          "${{ runner.temp }}/node-v24.22.1-linux-x64/bin/node" --version
+
+      - name: Fetch clang 23.1.1 (exact version required, apt is too new)
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}"
+          curl -fsSL -o llvm-23.1.1.tar.xz \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-23.1.1/LLVM-23.1.1-Linux-X64.tar.xz"
+          mkdir llvm-23.1.1
+          tar -xf llvm-23.1.1.tar.xz -C llvm-23.1.1 --strip-components=1
+          rm llvm-23.1.1.tar.xz
+          ./llvm-23.1.1/bin/clang -dumpversion
+          test "$(./llvm-23.1.1/bin/clang -dumpversion)" = '23.1.1'
+
+      - name: Prepare the embedded-Undici build tools
+        working-directory: ${{ github.workspace }}
+        run: npm ci --ignore-scripts --no-audit --no-fund --prefix runtime/ohos/node/build-tools
+
+      - name: Build the LLVM C++ runtimes (libc++/libc++abi/libunwind)
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 runtime/ohos/node/build-runtimes.py \
+            --sdk-native "${{ runner.temp }}/ohos-sdk/native" \
+            --clang "${{ runner.temp }}/llvm-23.1.1/bin/clang" \
+            --source-archive "${{ runner.temp }}/llvm-project-23.1.1.src.tar.xz" \
+            --work "${{ runner.temp }}/runtimes-build" \
+            --output "${{ runner.temp }}/ohos-llvm-runtimes" \
+            --jobs 4
+          rm -f "${{ runner.temp }}/llvm-project-23.1.1.src.tar.xz"
+
+      - name: Build libnode.so (expect ~70+ min; V8 is the long pole)
+        working-directory: ${{ github.workspace }}
+        run: |
+          python3 runtime/ohos/node/build-node.py \
+            --sdk-native "${{ runner.temp }}/ohos-sdk/native" \
+            --clang "${{ runner.temp }}/llvm-23.1.1/bin/clang" \
+            --cxx-runtime "${{ runner.temp }}/ohos-llvm-runtimes" \
+            --source-archive "${{ runner.temp }}/node-v24.22.1.tar.xz" \
+            --host-node "${{ runner.temp }}/node-v24.22.1-linux-x64/bin/node" \
+            --work "${{ runner.temp }}/node-ohos-build" \
+            --output "${{ runner.temp }}/node-ohos-artifacts" \
+            --jobs 4
+          rm -f "${{ runner.temp }}/node-v24.22.1.tar.xz"
+          ls -lh "${{ runner.temp }}/node-ohos-artifacts"
+          file "${{ runner.temp }}/node-ohos-artifacts/libnode.so"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ohos-libnode-24.22.1
+          path: |
+            ${{ runner.temp }}/node-ohos-artifacts/libnode.so
+            ${{ runner.temp }}/node-ohos-artifacts/build.json
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish libnode.so as a public release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/node-ohos-artifacts"
+          if gh release view libnode-24.22.1 >/dev/null 2>&1; then
+            gh release upload libnode-24.22.1 libnode.so build.json --clobber
+          else
+            gh release create libnode-24.22.1 libnode.so build.json \
+              --title "libnode 24.22.1 (HarmonyOS arm64)" \
+              --notes "Cross-compiled libnode.so for aarch64-linux-ohos, Node 24.22.1, built by the OHOS libnode workflow."
+          fi
