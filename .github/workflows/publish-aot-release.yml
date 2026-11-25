@@ -45,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           cd aot-artifacts
-          ls -R | head -40
+          ls -R
           ART="$(ls -d ohos-aot-*)"
           find "$ART" \( -name app.so -o -name libapp.so \) | grep -q .
           ls -lh "$ART"
