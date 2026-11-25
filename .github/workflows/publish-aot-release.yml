@@ -1,0 +1,63 @@
+# Fork-only helper workflow: publishes an already-built Dart AOT artifact
+# (ohos-aot-<sha>: libapp.so + flutter_assets) as a public release asset,
+# without rebuilding anything.
+# Use case: the "OHOS compile" run on this fork produces the AOT as a
+# workflow artifact with only 14 days retention, and downloading it needs a
+# GitHub token or a signed-in web download. Publishing it as a release asset
+# makes it a permanent public download, same trick as the libnode release.
+# Trigger manually: Actions -> Publish AOT release -> Run workflow,
+# with run_id = the OHOS compile run that produced the artifact.
+# File location in the fork: .github/workflows/publish-aot-release.yml
+# (push via the GitHub web editor, as with the libnode/hap-libs workflows).
+
+name: Publish AOT release
+
+on:
+  workflow_run:
+    workflows: ["OHOS compile"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Run id of the OHOS compile run whose artifact to publish'
+        required: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ohos-aot-*
+          run-id: ${{ inputs.run_id || github.event.workflow_run.id }}
+          path: aot-artifacts
+          github-token: ${{ github.token }}
+
+      - name: Publish AOT as a public release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd aot-artifacts
+          ls -R | head -40
+          ART="$(ls -d ohos-aot-*)"
+          find "$ART" \( -name app.so -o -name libapp.so \) | grep -q .
+          ls -lh "$ART"
+          zip -r -q "../$ART.zip" "$ART"
+          sha256sum "../$ART.zip" > "../$ART.zip.sha256"
+          cd ..
+          ls -lh "$ART.zip" "$ART.zip.sha256"
+          if gh release view "$ART" --repo winjoon-lee/dsh-Go >/dev/null 2>&1; then
+            gh release upload "$ART" "$ART.zip" "$ART.zip.sha256" --clobber --repo winjoon-lee/dsh-Go
+          else
+            gh release create "$ART" "$ART.zip" "$ART.zip.sha256" \
+              --repo winjoon-lee/dsh-Go \
+              --title "Dart AOT for HarmonyOS arm64 ($ART)" \
+              --notes "Dart AOT bundle (libapp.so + flutter_assets) for HarmonyOS arm64, built by the OHOS compile workflow on this fork. Unzip and pass the extracted directory to tooling/ohos/ci/package-hap.sh."
+          fi
